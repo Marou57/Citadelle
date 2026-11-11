@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valider un signal</title>
+<style>
+:root{--bg:#110f15;--panel:#1b1820;--line:#2f2a35;--ink:#f1ebe0;--muted:#a79f98;--accent:#f0a64a;--good:#6fd99a;--bad:#ff7a6b;color-scheme:dark}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,sans-serif;padding:16px;max-width:520px;margin:auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+h1{font-size:20px;margin:0 0 8px}ul{padding-left:18px;font-size:14px;color:var(--muted)}
+.ko{color:var(--bad)}.ok{color:var(--good)}
+.btns{display:flex;gap:10px;margin-top:14px}button{flex:1;font:inherit;font-size:18px;min-height:56px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+button.go{background:var(--accent);color:#1d1307;border-color:var(--accent);font-weight:700}
+</style>
+</head>
+<body>
+<div class="card" id="c">Chargement…</div>
+<script>
+const k = new URLSearchParams(location.search).get("k") || "", sid = location.pathname.split("/").pop();
+const c = document.getElementById("c");
+const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+async function load() {
+  const r = await fetch("/api/state?k=" + encodeURIComponent(k));
+  if (!r.ok) { c.textContent = "Lien invalide."; return; }
+  const S = await r.json(), s = S.signals.find(x => x.id === sid);
+  c.innerHTML = "";
+  if (!s) { c.textContent = "Signal introuvable."; return; }
+  c.append(el("h1", "", `${s.side === "buy" ? "Achat" : "Vente"} ${s.symbol}`), el("div", "", `Entrée ${s.entry} · Stop ${s.sl} · Objectif ${s.tp}`), el("div", "", `Risque : ${s.riskAmount} ${S.config.currency} · R:R ${s.rr ?? "?"}`), el("div", "", "Statut : " + s.status));
+  const ul = el("ul"); (s.checks || []).forEach(ch => ul.append(el("li", ch.ok ? "ok" : "ko", `${ch.regle} : ${ch.detail}`))); c.append(ul);
+  if (s.status === "en attente") {
+    const b = el("div", "btns"), v = el("button", "go", "Valider"), n = el("button", "", "Refuser");
+    const go = async d => { v.disabled = n.disabled = true; const r2 = await fetch("/api/decide/" + sid + "?k=" + encodeURIComponent(k), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: d }) }); const j = await r2.json().catch(() => ({})); c.append(el("p", j.ok ? "ok" : "ko", j.message || j.error || "Erreur")); };
+    v.onclick = () => go("valider"); n.onclick = () => go("refuser"); b.append(v, n); c.append(b);
+    if (S.config.executionMode === "off") c.append(el("p", "", "Mode simulation : aucun ordre ne sera passé."));
+  }
+}
+load();
+</script>
+</body>
+</html>

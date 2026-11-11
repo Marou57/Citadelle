@@ -1,0 +1,10 @@
+{
+  "name": "citadelle-serveur",
+  "version": "0.1.0",
+  "description": "Serveur central de la Citadelle : alertes TradingView, règles Sniper, validation, pont MetaTrader 5 et flux en direct.",
+  "type": "module",
+  "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js", "test": "node --test test/*.test.js" },
+  "dependencies": { "express": "4.21.2" }
+}

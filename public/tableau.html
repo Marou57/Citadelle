@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Citadelle · tableau de bord</title>
+<style>
+:root{--bg:#110f15;--panel:#1b1820;--line:#2f2a35;--ink:#f1ebe0;--muted:#a79f98;--accent:#f0a64a;--good:#6fd99a;--bad:#ff7a6b;--warn:#ffd25e;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,sans-serif;padding:16px}
+h1{font-size:24px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 16px;font-size:14px}
+.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));margin-bottom:14px}
+.tile,.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.k{font-size:12px;color:var(--muted)}.v{font:600 20px ui-monospace,Menlo,monospace;margin-top:2px}
+.panel{margin-bottom:12px}.panel h2{font-size:13px;color:var(--muted);margin:0 0 8px}
+.row{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line);font-size:14px}.row:first-of-type{border-top:0}
+.tag{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.wait{color:var(--warn)}.ok{color:var(--good)}.ko{color:var(--bad)}
+button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;min-height:40px;cursor:pointer}
+button.go{background:var(--accent);color:#1d1307;border-color:var(--accent);font-weight:600}
+.checks{font-size:13px;color:var(--muted);margin:6px 0 0;padding-left:18px}
+.err{color:var(--bad)}
+</style>
+</head>
+<body>
+<h1>Citadelle · tableau de bord</h1>
+<p class="sub" id="status">Connexion…</p>
+<div class="grid">
+  <div class="tile"><div class="k">Solde</div><div class="v" id="bal">–</div></div>
+  <div class="tile"><div class="k">Équité</div><div class="v" id="eq">–</div></div>
+  <div class="tile"><div class="k">Résultat du jour</div><div class="v" id="day">–</div></div>
+  <div class="tile"><div class="k">Exécution</div><div class="v" id="mode">–</div></div>
+</div>
+<div class="panel"><h2>Positions ouvertes</h2><div id="pos"></div></div>
+<div class="panel"><h2>Signaux</h2><div id="sig"></div></div>
+<div class="panel"><h2>Journal</h2><div id="ev"></div></div>
+<script>
+const k = new URLSearchParams(location.search).get("k") || "";
+const $ = id => document.getElementById(id);
+let S = { account: null, signals: [], orders: [], events: [], config: {} };
+const money = (v, c) => (Number.isFinite(v) ? v.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " " + (c || "") : "–");
+const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+function render() {
+  const a = S.account, c = (a && a.currency) || S.config.currency || "";
+  $("bal").textContent = a ? money(a.balance, c) : "–";
+  $("eq").textContent = a ? money(a.equity, c) : "–";
+  $("day").textContent = a ? (a.dayPnl >= 0 ? "+" : "") + money(a.dayPnl, c) + " (" + a.dayPnlPct.toFixed(2) + " %)" : "–";
+  $("day").className = "v " + (a ? (a.dayPnl >= 0 ? "ok" : "ko") : "");
+  $("mode").textContent = S.config.executionMode === "off" ? "Simulation" : S.config.executionMode || "–";
+  const P = $("pos"); P.innerHTML = "";
+  if (!a) P.append(el("div", "k", "Le robot MetaTrader n'a encore rien envoyé."));
+  else if (!a.positions.length) P.append(el("div", "k", "Aucune position."));
+  else a.positions.forEach(p => { const r = el("div", "row"); r.append(el("span", "", `${p.type === "buy" ? "Achat" : "Vente"} ${p.symbol} · ${p.volume} lot · stop ${p.sl || "–"}`), el("span", p.profit >= 0 ? "ok" : "ko", money(p.profit, c))); P.append(r); });
+  const G = $("sig"); G.innerHTML = "";
+  if (!S.signals.length) G.append(el("div", "k", "Aucun signal reçu."));
+  S.signals.slice(0, 20).forEach(s => {
+    const box = el("div", "row"); box.style.flexDirection = "column";
+    const top = el("div"); top.style.display = "flex"; top.style.justifyContent = "space-between"; top.style.gap = "10px";
+    top.append(el("strong", "", `${s.side === "buy" ? "Achat" : "Vente"} ${s.symbol} · entrée ${s.entry} · stop ${s.sl} · objectif ${s.tp}`), el("span", "tag " + (s.status === "en attente" ? "wait" : /validé|exécuté/.test(s.status) ? "ok" : "ko"), s.status));
+    box.append(top);
+    const ul = el("ul", "checks"); (s.checks || []).forEach(ch => ul.append(el("li", ch.ok ? "" : ch.bloquante ? "ko" : "wait", `${ch.regle} : ${ch.detail}`))); box.append(ul);
+    if (s.status === "en attente") {
+      const b = el("div"); b.style.display = "flex"; b.style.gap = "8px"; b.style.marginTop = "6px";
+      const v = el("button", "go", "Valider"), r = el("button", "", "Refuser");
+      v.onclick = () => decide(s.id, "valider"); r.onclick = () => decide(s.id, "refuser");
+      b.append(v, r); box.append(b);
+    }
+    G.append(box);
+  });
+  const E = $("ev"); E.innerHTML = "";
+  S.events.slice(0, 40).forEach(e => { const r = el("div", "row"); r.append(el("span", "", e.text), el("span", "k", new Date(e.at).toLocaleString("fr-FR", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }))); E.append(r); });
+}
+async function decide(id, decision) {
+  const r = await fetch("/api/decide/" + id + "?k=" + encodeURIComponent(k), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
+  const j = await r.json().catch(() => ({})); if (!j.ok) alertBox(j.message || j.error || "Erreur");
+}
+function alertBox(t) { $("status").textContent = t; $("status").className = "sub err"; }
+const upsert = (arr, item, key = "id") => { const i = arr.findIndex(x => x[key] === item[key]); if (i >= 0) arr[i] = item; else arr.unshift(item); };
+async function start() {
+  if (!k) return alertBox("Ajoute ?k=TA_CLE_DU_TABLEAU à l'adresse.");
+  const r = await fetch("/api/state?k=" + encodeURIComponent(k)); if (!r.ok) return alertBox("Clé invalide.");
+  S = await r.json(); render();
+  const es = new EventSource("/api/stream?k=" + encodeURIComponent(k));
+  es.addEventListener("snapshot", e => { S.account = JSON.parse(e.data); render(); });
+  es.addEventListener("signal", e => { upsert(S.signals, JSON.parse(e.data)); render(); });
+  es.addEventListener("order", e => { upsert(S.orders, JSON.parse(e.data)); render(); });
+  es.addEventListener("event", e => { S.events.unshift(JSON.parse(e.data)); render(); });
+  es.onopen = () => { $("status").textContent = "En direct"; $("status").className = "sub ok"; };
+  es.onerror = () => { $("status").textContent = "Connexion perdue, reconnexion…"; $("status").className = "sub wait"; };
+}
+start();
+</script>
+</body>
+</html>
