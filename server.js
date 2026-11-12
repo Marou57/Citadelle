@@ -37,7 +37,7 @@ const needBridge = (req, res, next) => {
 // ---------- Telegram
 const validationLink = sig => (config.publicUrl && config.dashboardKey ? `${config.publicUrl}/valider/${sig.id}?k=${encodeURIComponent(config.dashboardKey)}` : "");
 function signalText(sig) {
-  const head = sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`;
+  const head = (sig.test ? "🧪 <b>TEST</b> · " : "") + (sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`);
   const lines = [
     head,
     `${sig.side === "buy" ? "Achat" : "Vente"} <b>${esc(sig.symbol)}</b> ${sig.timeframe ? "(" + esc(sig.timeframe) + ")" : ""}`,
@@ -60,7 +60,10 @@ async function decide(sid, decision, via) {
     store.updateSignal(sid, { status: "refusé", decidedVia: via });
     store.log("signal", `Signal ${sig.symbol} refusé (${via})`, { signalId: sid });
   } else {
-    if (config.executionMode === "off") {
+    if (sig.test) {
+      store.updateSignal(sid, { status: "validé · test", decidedVia: via });
+      store.log("signal", `Signal de test validé (${via}) : jamais d'ordre pour un test`, { signalId: sid });
+    } else if (config.executionMode === "off") {
       store.updateSignal(sid, { status: "validé · simulation", decidedVia: via });
       store.log("signal", `Signal ${sig.symbol} validé en simulation (${via}) : aucun ordre envoyé`, { signalId: sid });
     } else {
@@ -83,13 +86,23 @@ app.post("/webhook/tradingview", async (req, res) => {
   let body = req.body;
   if (typeof body === "string") { try { body = JSON.parse(body); } catch { return res.status(400).send("JSON invalide"); } }
   if (!body || !safeEq(body.secret, config.webhookSecret)) return res.status(401).send("secret invalide");
-  const a = normalizeAlert(body);
-  const ev = evaluateSignal(a, { config, account: store.publicAccount() });
-  const sig = store.addSignal({ id: id(), ...a, ...ev, status: ev.ok ? "en attente" : "bloqué", createdAt: Date.now(), expiresAt: Date.now() + config.signalTtlMin * 60000 });
-  store.log("signal", ev.ok ? `Signal ${a.symbol} ${a.side === "buy" ? "achat" : "vente"} en attente de validation` : `Signal ${a.symbol} bloqué : ${ev.checks.filter(c => !c.ok && c.bloquante).map(c => c.regle).join(", ")}`, { signalId: sig.id });
+  const sig = createSignal(normalizeAlert(body), false);
   res.json({ ok: true, id: sig.id, status: sig.status });
-  try { const mid = await telegram.sendSignal(sig, signalText(sig)); if (mid) store.updateSignal(sig.id, { telegramMessageId: mid }); }
-  catch (e) { console.warn("[telegram]", e.message); }
+});
+function createSignal(a, test) {
+  const ev = evaluateSignal(a, { config, account: store.publicAccount() });
+  const sig = store.addSignal({ id: id(), ...a, ...ev, test, status: ev.ok ? "en attente" : "bloqué", createdAt: Date.now(), expiresAt: Date.now() + config.signalTtlMin * 60000 });
+  const label = (test ? "Signal de test " : "Signal ") + a.symbol;
+  store.log("signal", ev.ok ? `${label} ${a.side === "buy" ? "achat" : "vente"} en attente de validation` : `${label} bloqué : ${ev.checks.filter(c => !c.ok && c.bloquante).map(c => c.regle).join(", ")}`, { signalId: sig.id });
+  telegram.sendSignal(sig, signalText(sig)).then(mid => { if (mid) store.updateSignal(sig.id, { telegramMessageId: mid }); }).catch(e => console.warn("[telegram]", e.message));
+  return sig;
+}
+// Signal de test : passe par les mêmes règles et la même validation, mais ne crée JAMAIS d'ordre.
+app.post("/api/test-signal", needDashboard, (req, res) => {
+  const side = (req.body && req.body.side) === "sell" ? "sell" : "buy";
+  const entry = 2000, sl = side === "buy" ? 1990 : 2010, tp = side === "buy" ? 2030 : 1970;
+  const sig = createSignal({ symbol: "XAUUSD", side, entry, sl, tp, timeframe: "240", note: "test" }, true);
+  res.json({ ok: true, id: sig.id, status: sig.status });
 });
 
 // ---------- pont MetaTrader 5 (robot CitadelleBridge.mq5)
@@ -143,7 +156,8 @@ app.get("/api/stream", needDashboard, (req, res) => {
 // ---------- pages
 app.get("/valider/:id", (req, res) => res.sendFile(path.join(__dirname, "public", "valider.html")));
 app.get("/tableau", (req, res) => res.sendFile(path.join(__dirname, "public", "tableau.html")));
-app.get("/", (req, res) => res.redirect("/tableau"));
+app.get("/citadelle", (req, res) => res.sendFile(path.join(__dirname, "public", "citadelle.html")));
+app.get("/", (req, res) => res.redirect("/citadelle"));
 
 // ---------- tâches de fond : expiration des signaux, alerte si le robot se tait
 setInterval(() => {

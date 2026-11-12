@@ -11,7 +11,7 @@ export class Store extends EventEmitter {
     super();
     this.file = path.join(dir, "state.json");
     fs.mkdirSync(dir, { recursive: true });
-    this.s = { account: null, accountAt: 0, dayStart: null, signals: [], orders: [], events: [] };
+    this.s = { account: null, accountAt: 0, dayStart: null, signals: [], orders: [], events: [], equity: [] };
     try { Object.assign(this.s, JSON.parse(fs.readFileSync(this.file, "utf8"))); } catch { /* premier démarrage */ }
     this.timer = null;
   }
@@ -38,6 +38,11 @@ export class Store extends EventEmitter {
     if (!this.s.dayStart || this.s.dayStart.day !== dayKey || this.s.dayStart.login !== snap.login) {
       this.s.dayStart = { day: dayKey, login: snap.login, balance: snap.balance };
       this.log("compte", `Nouvelle journée : solde de départ ${snap.balance} ${snap.currency || ""}`.trim());
+    }
+    const eq = this.s.equity || (this.s.equity = []), last = eq[eq.length - 1];
+    if (!last || Date.now() - last.at >= 60000) {
+      eq.push({ at: Date.now(), equity: snap.equity, balance: snap.balance });
+      if (eq.length > 1500) eq.splice(0, eq.length - 1500);
     }
     this.save();
     this.emit("snapshot", this.publicAccount());
@@ -71,6 +76,6 @@ export class Store extends EventEmitter {
     this.save(); this.emit("order", o); return o;
   }
   summary() {
-    return { account: this.publicAccount(), signals: this.s.signals.slice(0, 50), orders: this.s.orders.slice(0, 50), events: this.s.events.slice(0, 100) };
+    return { account: this.publicAccount(), signals: this.s.signals.slice(0, 50), orders: this.s.orders.slice(0, 50), events: this.s.events.slice(0, 100), equity: (this.s.equity || []).slice(-600) };
   }
 }
