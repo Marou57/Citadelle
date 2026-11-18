@@ -1069,7 +1069,7 @@ async function connect() {
     if (!r.ok) { live.status = "clé invalide"; renderSide(); return; }
     Object.assign(live, await r.json());
   } catch { live.status = "hors ligne"; renderSide(); return; }
-  syncKnown();
+  syncKnown(); if (live.account) lastAccountAt = live.account.at;
   live.events.slice(0, 20).reverse().forEach(e => addLog("tradeLog", true, null, e.text, new Date(e.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })));
   if (live.account) { known.firstSnap = false; world.run(["lou"], (W, l) => W.say(l, `Compte connecté : solde ${eur(live.account.balance)}.`, 3.4)); }
   else world.run(["lou"], (W, l) => W.say(l, "Le robot MetaTrader n'est pas encore branché. Rendez-vous ce week-end !", 4));
@@ -1077,7 +1077,7 @@ async function connect() {
   es.onopen = () => { live.status = "en direct"; renderSide(); };
   es.onerror = () => { live.status = "reconnexion"; renderSide(); };
   es.addEventListener("state", e => { const d = JSON.parse(e.data); live.account = d.account; live.signals = d.signals; live.orders = d.orders; live.equity = d.equity || live.equity; syncKnown(); renderSide(); });
-  es.addEventListener("snapshot", e => { const a = JSON.parse(e.data); live.account = a; const last = live.equity[live.equity.length - 1]; if (!last || Date.now() - last.at >= 60000) live.equity.push({ at: Date.now(), equity: a.equity }); onSnapshot(a); renderSide(); });
+  es.addEventListener("snapshot", e => { const a = JSON.parse(e.data); live.account = a; lastAccountAt = a.at; const last = live.equity[live.equity.length - 1]; if (!last || Date.now() - last.at >= 60000) live.equity.push({ at: Date.now(), equity: a.equity }); onSnapshot(a); renderSide(); });
   es.addEventListener("signal", e => { const s = JSON.parse(e.data); upsert(live.signals, s); onSignal(s); renderSide(); });
   es.addEventListener("order", e => { const o = JSON.parse(e.data); upsert(live.orders, o); onOrder(o); renderSide(); });
   es.addEventListener("event", e => { const ev = JSON.parse(e.data); live.events.unshift(ev); onServerEvent(ev); });
@@ -1088,11 +1088,35 @@ async function decide(id, decision) {
   const j = await r.json().catch(() => ({})); if (!j.ok) { $("liveNote").textContent = j.message || j.error || "Erreur"; }
 }
 async function testSignal(side) {
-  $("liveNote").textContent = "Signal de test envoyé : regarde la salle et ton Telegram.";
-  const r = await fetch("/api/test-signal?k=" + encodeURIComponent(K), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ side }) });
-  if (!r.ok) $("liveNote").textContent = "Le test n'a pas pu être envoyé.";
+  const note = $("liveNote");
+  if (!K) { note.textContent = "Ajoute ?k=TA_CLE à l'adresse de la page, sinon le serveur refuse le test."; return; }
+  note.textContent = "Envoi du signal de test…";
   if (view !== "marches") location.hash = "marches";
+  try {
+    const r = await fetch("/api/test-signal?k=" + encodeURIComponent(K), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ side }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) { note.textContent = "Clé refusée : vérifie la valeur après ?k= (ta DASHBOARD_KEY)."; return; }
+    if (!r.ok || !j.ok) { note.textContent = "Le serveur n'a pas accepté le test (code " + r.status + ")."; return; }
+    note.textContent = j.status === "bloqué" ? "Signal de test créé, mais bloqué par une règle (voir ci-dessous)." : "Signal de test créé : regarde la salle et ton Telegram.";
+    setTimeout(() => refreshState(true), 1200);
+  } catch (e) { note.textContent = "Serveur injoignable, vérifie ta connexion."; }
 }
+// Filet de sécurité : relit l'état toutes les 10 s, au cas où le flux en direct serait coupé ou retenu par l'hébergeur.
+let lastAccountAt = 0;
+async function refreshState(animate) {
+  if (!K) return;
+  try {
+    const r = await fetch("/api/state?k=" + encodeURIComponent(K)); if (!r.ok) return;
+    const d = await r.json();
+    live.config = d.config || live.config; live.equity = d.equity || live.equity;
+    (d.signals || []).slice().reverse().forEach(sg => { upsert(live.signals, sg); if (animate) onSignal(sg); else known.signals.set(sg.id, sg.status); });
+    (d.orders || []).slice().reverse().forEach(o => { upsert(live.orders, o); if (animate) onOrder(o); else known.orders.set(o.id, o.status); });
+    live.signals.sort((a, b) => b.createdAt - a.createdAt);
+    if (d.account && d.account.at !== lastAccountAt) { lastAccountAt = d.account.at; live.account = d.account; if (animate) onSnapshot(d.account); }
+    renderSide();
+  } catch { /* on réessaiera */ }
+}
+setInterval(() => refreshState(true), 10000);
 
 /* ---- interface ---- */
 const STAT_CLASS = s => (s === "en attente" ? "wait" : /validé|exécuté/.test(s) ? "done" : s === "expiré" ? "" : "run");
