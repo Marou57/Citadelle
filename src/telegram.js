@@ -2,8 +2,8 @@
 // Fonctionne en « long polling » : pas besoin de configurer de webhook Telegram.
 
 export class Telegram {
-  constructor({ token, chatId, onDecision, log }) {
-    this.token = token; this.chatId = String(chatId || ""); this.onDecision = onDecision; this.log = log || console.log;
+  constructor({ token, chatId, onDecision, onCommand, log }) {
+    this.token = token; this.chatId = String(chatId || ""); this.onDecision = onDecision; this.onCommand = onCommand; this.log = log || console.log;
     this.offset = 0; this.running = false;
   }
   get enabled() { return !!(this.token && this.chatId); }
@@ -39,8 +39,10 @@ export class Telegram {
               const [kind, id] = String(q.data || "").split(":");
               const res = await this.onDecision(id, kind === "v" ? "valider" : "refuser", "Telegram");
               await this.call("answerCallbackQuery", { callback_query_id: q.id, text: res.message }).catch(() => {});
-            } else if (u.message && String(u.message.chat.id) === this.chatId && /^\/start|^\/id/.test(u.message.text || "")) {
-              await this.send(`Citadelle connectée. Ton identifiant de discussion : <code>${u.message.chat.id}</code>`);
+            } else if (u.message && String(u.message.chat.id) === this.chatId) {
+              const t = (u.message.text || "").trim().toLowerCase();
+              if (/^\/(start|id)\b/.test(t)) await this.send(`Citadelle connectée. Ton identifiant de discussion : <code>${u.message.chat.id}</code>`);
+              else if (/^\/(pause|reprise|etat|état)\b/.test(t) && this.onCommand) await this.send(await this.onCommand(t.slice(1).split(/[\s@]/)[0].replace("é", "e")));
             }
           }
         } catch (e) {

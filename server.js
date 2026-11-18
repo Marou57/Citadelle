@@ -1,6 +1,7 @@
 // Serveur central de la Citadelle.
 // Alertes TradingView → règles du Sniper System → validation (Telegram ou page web) → robot MetaTrader 5.
 // Par défaut, AUCUN ordre n'est envoyé : EXECUTION_MODE vaut "off".
+// Avec AUTO_EXECUTE=true, les signaux du robot qui passent les règles partent sans validation (sauf si /pause).
 import express from "express";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -37,7 +38,7 @@ const needBridge = (req, res, next) => {
 // ---------- Telegram
 const validationLink = sig => (config.publicUrl && config.dashboardKey ? `${config.publicUrl}/valider/${sig.id}?k=${encodeURIComponent(config.dashboardKey)}` : "");
 function signalText(sig) {
-  const head = (sig.test ? "🧪 <b>TEST</b> · " : sig.source === "robot" ? "🤖 <b>Robot</b> · " : "") + (sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`);
+  const head = (sig.test ? "🧪 <b>TEST</b> · " : sig.source === "robot" ? "🤖 <b>Robot</b> · " : "") + (sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : sig.decidedVia === "auto" ? "⚡ <b>Ordre envoyé automatiquement</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`);
   const lines = [
     head,
     `${sig.side === "buy" ? "Achat" : "Vente"} <b>${esc(sig.symbol)}</b> ${sig.timeframe ? "(" + esc(sig.timeframe) + ")" : ""}`,
@@ -76,10 +77,23 @@ async function decide(sid, decision, via) {
   telegram.edit(s2.telegramMessageId, signalText(s2));
   return { ok: true, message: s2.status };
 }
-const telegram = new Telegram({ token: config.telegramToken, chatId: config.telegramChatId, onDecision: decide, log: (t, m) => console.warn(`[${t}] ${m}`) });
+// ---------- exécution automatique
+const autoActive = () => config.autoExecute && config.executionMode !== "off" && !store.s.paused;
+function autoStatus() {
+  if (!config.autoExecute) return "Exécution automatique : désactivée (AUTO_EXECUTE=false). Les signaux demandent ta validation.";
+  if (config.executionMode === "off") return "Exécution automatique prévue, mais EXECUTION_MODE=off : aucun ordre ne part.";
+  return store.s.paused ? "⏸ Exécution automatique en PAUSE. Les signaux demandent ta validation. /reprise pour relancer."
+                        : `⚡ Exécution automatique ACTIVE (${config.executionMode}, compte ${config.executionLogin}, risque ${config.riskPct} %). /pause pour arrêter.`;
+}
+async function onCommand(cmd) {
+  if (cmd === "pause") { store.s.paused = true; store.save(); store.log("compte", "Exécution automatique mise en pause (Telegram)"); }
+  if (cmd === "reprise") { store.s.paused = false; store.save(); store.log("compte", "Exécution automatique relancée (Telegram)"); }
+  return autoStatus();
+}
+const telegram = new Telegram({ token: config.telegramToken, chatId: config.telegramChatId, onDecision: decide, onCommand, log: (t, m) => console.warn(`[${t}] ${m}`) });
 
 // ---------- routes publiques
-app.get("/health", (req, res) => res.json({ ok: true, executionMode: config.executionMode, compte: !!store.s.account, derniereMaj: store.s.accountAt || null }));
+app.get("/health", (req, res) => res.json({ ok: true, executionMode: config.executionMode, auto: autoActive(), compte: !!store.s.account, derniereMaj: store.s.accountAt || null }));
 
 // TradingView : le message d'alerte doit être un JSON contenant "secret".
 app.post("/webhook/tradingview", async (req, res) => {
@@ -93,8 +107,11 @@ function createSignal(a, test, source = test ? "test" : "tradingview") {
   const ev = evaluateSignal(a, { config, account: store.publicAccount() });
   const sig = store.addSignal({ id: id(), ...a, ...ev, test, source, status: ev.ok ? "en attente" : "bloqué", createdAt: Date.now(), expiresAt: Date.now() + config.signalTtlMin * 60000 });
   const label = (test ? "Signal de test " : source === "robot" ? "Signal du robot " : "Signal ") + a.symbol;
-  store.log("signal", ev.ok ? `${label} ${a.side === "buy" ? "achat" : "vente"} en attente de validation` : `${label} bloqué : ${ev.checks.filter(c => !c.ok && c.bloquante).map(c => c.regle).join(", ")}`, { signalId: sig.id });
-  telegram.sendSignal(sig, signalText(sig)).then(mid => { if (mid) store.updateSignal(sig.id, { telegramMessageId: mid }); }).catch(e => console.warn("[telegram]", e.message));
+  const auto = ev.ok && !test && source === "robot" && autoActive();
+  store.log("signal", ev.ok ? `${label} ${a.side === "buy" ? "achat" : "vente"} ${auto ? "exécuté automatiquement" : "en attente de validation"}` : `${label} bloqué : ${ev.checks.filter(c => !c.ok && c.bloquante).map(c => c.regle).join(", ")}`, { signalId: sig.id });
+  if (auto) decide(sig.id, "valider", "auto");
+  const final = store.getSignal(sig.id);
+  telegram.sendSignal(final, signalText(final)).then(mid => { if (mid) store.updateSignal(sig.id, { telegramMessageId: mid }); }).catch(e => console.warn("[telegram]", e.message));
   return sig;
 }
 // Signal de test : passe par les mêmes règles et la même validation, mais ne crée JAMAIS d'ordre.
@@ -144,7 +161,7 @@ app.post("/bridge/report", needBridge, (req, res) => {
 });
 
 // ---------- API du tableau de bord et de la citadelle en direct
-app.get("/api/state", needDashboard, (req, res) => res.json({ ...store.summary(), config: { executionMode: config.executionMode, riskPct: config.riskPct, maxDailyLossPct: config.maxDailyLossPct, maxLossPct: config.maxLossPct, accountSize: config.accountSize, currency: config.currency } }));
+app.get("/api/state", needDashboard, (req, res) => res.json({ ...store.summary(), config: { executionMode: config.executionMode, autoExecute: autoActive(), paused: !!store.s.paused, riskPct: config.riskPct, maxDailyLossPct: config.maxDailyLossPct, maxLossPct: config.maxLossPct, accountSize: config.accountSize, currency: config.currency } }));
 app.post("/api/decide/:id", needDashboard, async (req, res) => {
   const d = String((req.body && req.body.decision) || "");
   if (!["valider", "refuser"].includes(d)) return res.status(400).json({ error: "décision invalide" });
@@ -183,4 +200,5 @@ setInterval(() => {
 app.listen(config.port, () => {
   console.log(`Citadelle : serveur démarré sur le port ${config.port} · exécution : ${config.executionMode}`);
   telegram.start();
+  if (config.autoExecute) { console.log("[auto] " + autoStatus()); telegram.send(autoStatus()); }
 });

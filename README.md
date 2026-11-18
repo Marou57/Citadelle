@@ -86,6 +86,7 @@ Dans MetaTrader : Affichage → Testeur de stratégie → `CitadelleBridge`, sym
 1. **Lecture seule** : le robot envoie le compte, rien d'autre. `EXECUTION_MODE=off`.
 2. **Vraies alertes, validation simulée** : tu valides sur Telegram, aucun ordre ne part.
 3. **Compte d'essai FTMO** pendant au moins deux semaines : `EXECUTION_MODE=demo`, `EXECUTION_LOGIN=<numéro du compte d'essai>`, mot de passe principal de ce compte, `AllowTrading=true`.
+3 bis. **Exécution automatique** (facultatif) : `AUTO_EXECUTE=true`. Les signaux du **robot** qui passent toutes les règles partent sans validation ; Telegram t'informe (« ⚡ Ordre envoyé automatiquement »). Les tests et les alertes TradingView demandent toujours ta validation. Sur Telegram : `/pause` (retour à la validation manuelle), `/reprise`, `/etat`. Un redéploiement annule la pause : pour arrêter durablement, remets `AUTO_EXECUTE=false`.
 4. **Compte réel** seulement si la phase 3 est propre : `EXECUTION_MODE=live`, `EXECUTION_LOGIN=<ton compte>`.
 
 ## Tests

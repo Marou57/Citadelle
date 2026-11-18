@@ -36,6 +36,9 @@ export const config = {
   // Exécution : "off" par défaut. Les ordres ne partent QUE vers le compte EXECUTION_LOGIN.
   executionMode: (process.env.EXECUTION_MODE || "off").toLowerCase(), // off | demo | live
   executionLogin: process.env.EXECUTION_LOGIN || "",
+  // Exécution automatique : les signaux du robot qui passent toutes les règles partent sans validation.
+  // Ne concerne que la source « robot » (jamais les tests ni TradingView). Pause possible avec /pause sur Telegram.
+  autoExecute: (process.env.AUTO_EXECUTE || "false").toLowerCase() === "true",
 };
 
 export function checkConfig() {
