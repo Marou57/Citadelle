@@ -21,14 +21,15 @@ export const config = {
   // Compte et règles du Sniper System (à ajuster à ton compte FTMO)
   accountSize: num(process.env.ACCOUNT_SIZE, 40000),
   currency: process.env.ACCOUNT_CURRENCY || "EUR",
-  riskPct: num(process.env.RISK_PCT, 1),
+  riskPct: num(process.env.RISK_PCT, 1),                     // risque des signaux qui n'en précisent pas (tests, TradingView)
+  maxRiskPct: num(process.env.MAX_RISK_PCT, 1),               // plafond du risque demandé par le robot (risque adaptatif)
   minRR: num(process.env.MIN_RR, 2),
   maxDailyLossPct: num(process.env.MAX_DAILY_LOSS_PCT, 5),   // à vérifier dans les règles de ton compte
   maxLossPct: num(process.env.MAX_LOSS_PCT, 10),             // à vérifier dans les règles de ton compte
   dailyBufferPct: num(process.env.DAILY_BUFFER_PCT, 1),      // marge de sécurité avant la limite du jour
   maxOpen: num(process.env.MAX_OPEN, 2),
   noMonday: (process.env.NO_MONDAY || "true") !== "false",
-  allowedSymbols: list(process.env.ALLOWED_SYMBOLS, ["XAUUSD", "EURUSD", "BTCUSD"]),
+  allowedSymbols: list(process.env.ALLOWED_SYMBOLS, ["XAUUSD", "US100.CASH", "EURUSD", "GBPJPY", "BTCUSD"]),
   symbolMap: json(process.env.SYMBOL_MAP, {}),               // ex. {"XAUUSD":"XAUUSD.r"} si le nom diffère sur MT5
   newsBlocks: json(process.env.NEWS_BLOCKS, []),             // ex. [{"from":"2026-11-14T14:15:00+01:00","to":"2026-11-14T14:45:00+01:00","label":"CPI US"}]
   signalTtlMin: num(process.env.SIGNAL_TTL_MIN, 30),

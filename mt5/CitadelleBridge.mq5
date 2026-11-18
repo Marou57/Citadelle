@@ -2,13 +2,14 @@
 //| CitadelleBridge.mq5                                              |
 //| 1. Envoie l'état du compte au serveur de la Citadelle.           |
 //| 2. Détecte les setups de la stratégie « Gold Swing MTF »         |
-//|    (tendance H4 + entrée H1) et les envoie au serveur.           |
+//|    (tendance H4 + entrée H1) sur plusieurs marchés, calcule le   |
+//|    risque adaptatif et envoie les setups au serveur.             |
 //| 3. Seulement si AllowTrading = true : exécute les ordres validés.|
 //| Dans le testeur de stratégie : prend les trades lui-même         |
 //| (risque fixe, SL/TP) pour mesurer la stratégie sur l'historique. |
 //+------------------------------------------------------------------+
 #property copyright "Citadelle"
-#property version   "0.20"
+#property version   "0.30"
 #property strict
 #include <Trade/Trade.mqh>
 
@@ -32,14 +33,41 @@ input double          AtrMultSL = 2.0;              // stop = ATR × 2
 input double          RRRatio   = 3.0;              // objectif = 3 × le stop
 input double          VolFactor = 1.05;             // volume > moyenne 20 × 1,05
 
-input group "Backtest (testeur de stratégie uniquement)"
-input double TestRiskPct  = 1.0;                    // risque par trade en %
-input bool   TestNoMonday = true;                   // reproduit la règle « pas de trade le lundi » du serveur
+input group "Marchés"
+input string Symbols = "XAUUSD,US100.cash,EURUSD,GBPJPY"; // séparés par des virgules (noms exacts chez ton courtier) ; vide = symbole du graphique
+
+input group "Risque adaptatif"
+input bool   AdaptiveRisk  = true;    // false = toujours RiskBase
+input double RiskBase      = 1.0;     // risque normal par trade en %
+input double RiskReduced   = 0.5;     // risque réduit en %
+input int    LossStreak    = 2;       // après X pertes d'affilée : risque réduit jusqu'au prochain gain
+input double DrawdownPct   = 4.0;     // équité à plus de X % sous le capital de départ : risque réduit
+input double NearTargetPct = 2.0;     // à moins de X % de l'objectif : risque réduit (pour finir sans tout reperdre)
+
+input group "Challenge FTMO"
+input bool   ChallengeMode = true;    // ne plus ouvrir de trade une fois l'objectif atteint (ou la limite franchie en backtest)
+input double StartBalance  = 0;       // capital de départ du challenge (0 = solde au démarrage du robot)
+input double TargetPct     = 10.0;    // objectif en %
+input double DailyLossPct  = 5.0;     // backtest : limite de perte du jour en % du capital de départ
+input double MaxLossPct    = 10.0;    // backtest : limite de perte max en %
+input int    MaxOpen       = 2;       // backtest : positions simultanées max (comme MAX_OPEN sur le serveur)
+input bool   TestNoMonday  = true;    // backtest : pas de trade le lundi (comme le serveur)
 
 CTrade trade;
-int hEmaF = INVALID_HANDLE, hEmaS = INVALID_HANDLE, hRsi = INVALID_HANDLE;
-int hT21 = INVALID_HANDLE, hT50 = INVALID_HANDLE, hT200 = INVALID_HANDLE;
-bool inTester = false;
+struct Market
+  {
+   string            sym;
+   int               hEmaF, hEmaS, hRsi, hT21, hT50, hT200;
+   datetime          lastBar;
+  };
+Market mk[];
+int    nMk = 0;
+bool   inTester = false;
+double startBal = 0, dayStartBal = 0, lowestEq = 0;
+int    curDay = -1, testTrades = 0;
+bool   targetHit = false, failed = false;
+string targetInfo = "", failInfo = "";
+datetime startTime = 0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -51,46 +79,102 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
      }
    trade.SetExpertMagicNumber(Magic);
+   ArrayResize(mk, 0);
+   nMk = 0;
    if(StrategyEnabled)
      {
-      hEmaF = iMA(_Symbol, EntryTF, EmaFast, 0, MODE_EMA, PRICE_CLOSE);
-      hEmaS = iMA(_Symbol, EntryTF, EmaSlow, 0, MODE_EMA, PRICE_CLOSE);
-      hRsi  = iRSI(_Symbol, EntryTF, RsiLen, PRICE_CLOSE);
-      hT21  = iMA(_Symbol, TrendTF, EmaFast, 0, MODE_EMA, PRICE_CLOSE);
-      hT50  = iMA(_Symbol, TrendTF, EmaSlow, 0, MODE_EMA, PRICE_CLOSE);
-      hT200 = iMA(_Symbol, TrendTF, EmaTrend, 0, MODE_EMA, PRICE_CLOSE);
-      if(hEmaF == INVALID_HANDLE || hEmaS == INVALID_HANDLE || hRsi == INVALID_HANDLE || hT21 == INVALID_HANDLE || hT50 == INVALID_HANDLE || hT200 == INVALID_HANDLE)
+      string list[];
+      int n = (StringLen(Symbols) > 0) ? StringSplit(Symbols, ',', list) : 0;
+      for(int i = 0; i < n; i++)
         {
-         Print("Citadelle : impossible de créer les indicateurs de la stratégie.");
+         string s = list[i];
+         StringTrimLeft(s);
+         StringTrimRight(s);
+         if(StringLen(s) > 0)
+            AddMarket(s);
+        }
+      if(nMk == 0)
+         AddMarket(_Symbol);
+      if(nMk == 0)
+        {
+         Print("Citadelle : aucun marché utilisable pour la stratégie.");
          return(INIT_FAILED);
         }
      }
+   startBal = (StartBalance > 0) ? StartBalance : AccountInfoDouble(ACCOUNT_BALANCE);
+   lowestEq = AccountInfoDouble(ACCOUNT_EQUITY);
+   startTime = TimeCurrent();
+   if(!inTester && StartBalance <= 0)
+      Print("Citadelle : StartBalance = 0, le capital de départ pris est le solde actuel (", Num(startBal, 2), "). Mets le vrai capital du challenge pour un calcul juste.");
    if(!inTester)
       EventSetTimer(MathMax(2, PollSeconds));
-   Print("Citadelle : robot démarré sur ", _Symbol, ". Stratégie : ", (StrategyEnabled ? "active" : "désactivée"),
+   string names = "";
+   for(int i = 0; i < nMk; i++)
+      names += (i > 0 ? ", " : "") + mk[i].sym;
+   Print("Citadelle : robot démarré. Marchés : ", (StrategyEnabled ? names : "stratégie désactivée"),
+         ". Risque : ", (AdaptiveRisk ? "adaptatif " + Num(RiskBase, 2) + " % / " + Num(RiskReduced, 2) + " %" : "fixe " + Num(RiskBase, 2) + " %"),
          ". Exécution des ordres : ", (AllowTrading ? "ACTIVÉE" : "désactivée"), (inTester ? " (mode backtest)" : ""));
    return(INIT_SUCCEEDED);
+  }
+void AddMarket(string s)
+  {
+   for(int i = 0; i < nMk; i++)
+      if(StringCompare(mk[i].sym, s, false) == 0)
+         return;
+   if(!SymbolSelect(s, true))
+     {
+      Print("Citadelle : marché introuvable chez ton courtier : ", s, " (ignoré). Vérifie le nom exact dans l'Observation du marché.");
+      return;
+     }
+   Market m;
+   m.sym = s;
+   m.lastBar = 0;
+   m.hEmaF = iMA(s, EntryTF, EmaFast, 0, MODE_EMA, PRICE_CLOSE);
+   m.hEmaS = iMA(s, EntryTF, EmaSlow, 0, MODE_EMA, PRICE_CLOSE);
+   m.hRsi  = iRSI(s, EntryTF, RsiLen, PRICE_CLOSE);
+   m.hT21  = iMA(s, TrendTF, EmaFast, 0, MODE_EMA, PRICE_CLOSE);
+   m.hT50  = iMA(s, TrendTF, EmaSlow, 0, MODE_EMA, PRICE_CLOSE);
+   m.hT200 = iMA(s, TrendTF, EmaTrend, 0, MODE_EMA, PRICE_CLOSE);
+   if(m.hEmaF == INVALID_HANDLE || m.hEmaS == INVALID_HANDLE || m.hRsi == INVALID_HANDLE || m.hT21 == INVALID_HANDLE || m.hT50 == INVALID_HANDLE || m.hT200 == INVALID_HANDLE)
+     {
+      Print("Citadelle : indicateurs impossibles à créer sur ", s, " (ignoré).");
+      return;
+     }
+   ArrayResize(mk, nMk + 1);
+   mk[nMk] = m;
+   nMk++;
   }
 void OnDeinit(const int reason)
   {
    EventKillTimer();
-   if(hEmaF != INVALID_HANDLE) IndicatorRelease(hEmaF);
-   if(hEmaS != INVALID_HANDLE) IndicatorRelease(hEmaS);
-   if(hRsi  != INVALID_HANDLE) IndicatorRelease(hRsi);
-   if(hT21  != INVALID_HANDLE) IndicatorRelease(hT21);
-   if(hT50  != INVALID_HANDLE) IndicatorRelease(hT50);
-   if(hT200 != INVALID_HANDLE) IndicatorRelease(hT200);
+   for(int i = 0; i < nMk; i++)
+     {
+      IndicatorRelease(mk[i].hEmaF);
+      IndicatorRelease(mk[i].hEmaS);
+      IndicatorRelease(mk[i].hRsi);
+      IndicatorRelease(mk[i].hT21);
+      IndicatorRelease(mk[i].hT50);
+      IndicatorRelease(mk[i].hT200);
+     }
+   if(inTester && startBal > 0)
+     {
+      double worst = (startBal - lowestEq) / startBal * 100.0;
+      Print("===== Résumé challenge =====");
+      Print("Capital de départ : ", Num(startBal, 2), " · trades : ", testTrades, " · pire point : ", Num(worst, 2), " % sous le départ");
+      Print("Objectif +", Num(TargetPct, 1), " % : ", (targetHit ? "ATTEINT " + targetInfo : "non atteint"));
+      Print("Limites de perte : ", (failed ? "FRANCHIES " + failInfo : "respectées"));
+     }
   }
 void OnTimer()
   {
    SendSnapshot();
    if(AllowTrading)
       PollOrders();
+   CheckAll();
   }
 void OnTick()
   {
-   if(StrategyEnabled)
-      CheckStrategy();
+   CheckAll();
   }
 
 //+------------------------------------------------------------------+
@@ -227,6 +311,7 @@ void Execute(string line)
       return;
    string id = f[0], sym = f[1], side = f[2];
    double sl = StringToDouble(f[3]), tp = StringToDouble(f[4]), risk = StringToDouble(f[5]);
+   sym = ResolveSymbol(sym);                             // le serveur met les noms en majuscules (US100.CASH → US100.cash)
    if(!SymbolSelect(sym, true))
      { Report(id, false, 0, 0, "symbole introuvable : " + sym); return; }
    int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
@@ -250,6 +335,105 @@ void Execute(string line)
   }
 
 //+------------------------------------------------------------------+
+//| Marchés, risque adaptatif et suivi du challenge                  |
+//+------------------------------------------------------------------+
+string ResolveSymbol(string s)
+  {
+   for(int i = 0; i < nMk; i++)
+      if(StringCompare(mk[i].sym, s, false) == 0)
+         return(mk[i].sym);
+   return(s);
+  }
+
+// Pertes d'affilée du robot (trades fermés avec son numéro magique, du plus récent au plus ancien).
+int LossesInARow()
+  {
+   if(!HistorySelect(0, TimeCurrent()))
+      return(0);
+   int cnt = 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0 || HistoryDealGetInteger(d, DEAL_MAGIC) != Magic)
+         continue;
+      long e = HistoryDealGetInteger(d, DEAL_ENTRY);
+      if(e != DEAL_ENTRY_OUT && e != DEAL_ENTRY_OUT_BY)
+         continue;
+      double p = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
+      if(p < 0)
+         cnt++;
+      else
+         break;
+     }
+   return(cnt);
+  }
+
+double CurrentRiskPct(string &why)
+  {
+   if(!AdaptiveRisk)
+     { why = "fixe"; return(RiskBase); }
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE), eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   int ls = LossesInARow();
+   if(ls >= LossStreak)
+     { why = IntegerToString(ls) + " pertes d'affilée"; return(RiskReduced); }
+   if(startBal > 0 && (startBal - eq) / startBal * 100.0 >= DrawdownPct)
+     { why = "sous le capital de départ"; return(RiskReduced); }
+   if(startBal > 0 && ChallengeMode && (bal - startBal) / startBal * 100.0 >= TargetPct - NearTargetPct)
+     { why = "proche de l'objectif"; return(RiskReduced); }
+   why = "normal";
+   return(RiskBase);
+  }
+
+// Objectif et limites de perte (les limites ne sont mesurées qu'en backtest : en réel, c'est FTMO et le serveur qui surveillent).
+void ChallengeWatch()
+  {
+   if(startBal <= 0)
+      return;
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE), eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.day_of_year != curDay)
+     { curDay = dt.day_of_year; dayStartBal = bal; }
+   if(!targetHit && bal >= startBal * (1.0 + TargetPct / 100.0))
+     {
+      targetHit = true;
+      int days = (int)((TimeCurrent() - startTime) / 86400);
+      targetInfo = "le " + TimeToString(TimeCurrent(), TIME_DATE) + " (" + IntegerToString(days) + " jours" + (inTester ? ", " + IntegerToString(testTrades) + " trades" : "") + ")";
+      Print("Citadelle : objectif +", Num(TargetPct, 1), " % atteint ", targetInfo, (ChallengeMode ? ". Plus aucun nouveau trade." : "."));
+     }
+   if(!inTester)
+      return;
+   if(eq < lowestEq)
+      lowestEq = eq;
+   if(!failed && eq <= dayStartBal - startBal * DailyLossPct / 100.0)
+     {
+      failed = true;
+      failInfo = "perte du jour le " + TimeToString(TimeCurrent(), TIME_DATE);
+      Print("Citadelle : ÉCHEC, limite de perte du jour franchie le ", TimeToString(TimeCurrent()));
+     }
+   if(!failed && eq <= startBal * (1.0 - MaxLossPct / 100.0))
+     {
+      failed = true;
+      failInfo = "perte max le " + TimeToString(TimeCurrent(), TIME_DATE);
+      Print("Citadelle : ÉCHEC, limite de perte max franchie le ", TimeToString(TimeCurrent()));
+     }
+  }
+
+bool CanOpen()
+  {
+   return(!(ChallengeMode && (targetHit || failed)));
+  }
+
+void CheckAll()
+  {
+   ChallengeWatch();
+   if(!StrategyEnabled)
+      return;
+   for(int k = 0; k < nMk; k++)
+      CheckMarket(k);
+  }
+
+//+------------------------------------------------------------------+
 //| Stratégie Gold Swing MTF                                         |
 //+------------------------------------------------------------------+
 double Buf(int handle, int shift)
@@ -261,12 +445,12 @@ double Buf(int handle, int shift)
   }
 
 // ATR lissé à la manière de TradingView (moyenne de Wilder), pour coller au script Pine.
-double AtrWilder(int shift)
+double AtrWilder(string s, int shift)
   {
    int n = AtrLen * 20;
    MqlRates r[];
    ArraySetAsSeries(r, false);
-   int got = CopyRates(_Symbol, EntryTF, shift, n + 1, r);
+   int got = CopyRates(s, EntryTF, shift, n + 1, r);
    if(got < AtrLen + 2)
       return(0);
    double atr = 0;
@@ -285,30 +469,30 @@ double AtrWilder(int shift)
    return(atr);
   }
 
-void CheckStrategy()
+void CheckMarket(int k)
   {
-   static datetime lastBar = 0;
-   datetime t1 = iTime(_Symbol, EntryTF, 1);
-   if(t1 == 0 || t1 == lastBar)
+   string s = mk[k].sym;
+   datetime t1 = iTime(s, EntryTF, 1);
+   if(t1 == 0 || t1 == mk[k].lastBar)
       return;
-   lastBar = t1;                                         // une seule analyse par bougie clôturée
-   if(Bars(_Symbol, EntryTF) < EmaTrend + 50 || Bars(_Symbol, TrendTF) < EmaTrend + 5)
+   mk[k].lastBar = t1;                                   // une seule analyse par bougie clôturée
+   if(Bars(s, EntryTF) < EmaTrend + 50 || Bars(s, TrendTF) < EmaTrend + 5)
       return;
 
    // Tendance : dernière bougie H4 clôturée (aucune information du futur)
-   double t21 = Buf(hT21, 1), t50 = Buf(hT50, 1), t200 = Buf(hT200, 1), tc = iClose(_Symbol, TrendTF, 1);
+   double t21 = Buf(mk[k].hT21, 1), t50 = Buf(mk[k].hT50, 1), t200 = Buf(mk[k].hT200, 1), tc = iClose(s, TrendTF, 1);
    // Entrée : dernière bougie H1 clôturée
-   double e21 = Buf(hEmaF, 1), e50 = Buf(hEmaS, 1), rsi = Buf(hRsi, 1);
+   double e21 = Buf(mk[k].hEmaF, 1), e50 = Buf(mk[k].hEmaS, 1), rsi = Buf(mk[k].hRsi, 1);
    if(t21 == EMPTY_VALUE || t50 == EMPTY_VALUE || t200 == EMPTY_VALUE || e21 == EMPTY_VALUE || e50 == EMPTY_VALUE || rsi == EMPTY_VALUE || tc <= 0)
       return;
-   double o = iOpen(_Symbol, EntryTF, 1), h = iHigh(_Symbol, EntryTF, 1), l = iLow(_Symbol, EntryTF, 1), c = iClose(_Symbol, EntryTF, 1);
-   double atr = AtrWilder(1);
+   double o = iOpen(s, EntryTF, 1), h = iHigh(s, EntryTF, 1), l = iLow(s, EntryTF, 1), c = iClose(s, EntryTF, 1);
+   double atr = AtrWilder(s, 1);
    if(atr <= 0)
       return;
    double volSum = 0;
    for(int i = 1; i <= 20; i++)
-      volSum += (double)iVolume(_Symbol, EntryTF, i);
-   double vol = (double)iVolume(_Symbol, EntryTF, 1), volMa = volSum / 20.0;
+      volSum += (double)iVolume(s, EntryTF, i);
+   double vol = (double)iVolume(s, EntryTF, 1), volMa = volSum / 20.0;
 
    bool h4Bull = t21 > t50 && t50 > t200 && tc > t200;
    bool h4Bear = t21 < t50 && t50 < t200 && tc < t200;
@@ -326,51 +510,66 @@ void CheckStrategy()
    bool shortSig = h4Bear && h1Bear && pbBear && bearCd && volOk && rsiBear;
    if(!longSig && !shortSig)
       return;
+   if(!CanOpen())
+      return;
 
-   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
    double slDist = atr * AtrMultSL;
    string side = longSig ? "buy" : "sell";
    double sl = NormalizeDouble(longSig ? c - slDist : c + slDist, dg);
    double tp = NormalizeDouble(longSig ? c + slDist * RRRatio : c - slDist * RRRatio, dg);
+   string why;
+   double riskPct = CurrentRiskPct(why);
 
    if(inTester)
-      TestTrade(side, sl, tp);
+      TestTrade(s, side, sl, tp, riskPct);
    else
-      SendSignal(side, c, sl, tp, dg);
+      SendSignal(s, side, c, sl, tp, dg, riskPct, why);
   }
 
-void SendSignal(string side, double entry, double sl, double tp, int dg)
+void SendSignal(string s, string side, double entry, double sl, double tp, int dg, double riskPct, string why)
   {
-   string j = "{\"symbol\":\"" + Esc(_Symbol) + "\",\"side\":\"" + side + "\""
+   string j = "{\"symbol\":\"" + Esc(s) + "\",\"side\":\"" + side + "\""
               + ",\"entry\":" + Num(entry, dg) + ",\"sl\":" + Num(sl, dg) + ",\"tp\":" + Num(tp, dg)
-              + ",\"timeframe\":\"" + EnumToString(EntryTF) + "\",\"note\":\"Robot Gold Swing MTF\"}";
+              + ",\"riskPct\":" + Num(riskPct, 2)
+              + ",\"timeframe\":\"" + EnumToString(EntryTF) + "\",\"note\":\"Robot Gold Swing MTF · risque " + Num(riskPct, 2) + " % (" + Esc(why) + ")\"}";
    string resp;
    if(Http("POST", "/bridge/signal", j, resp))
-      Print("Citadelle : setup ", side, " envoyé au serveur (entrée ", Num(entry, dg), ", stop ", Num(sl, dg), ", objectif ", Num(tp, dg), ").");
+      Print("Citadelle : setup ", side, " ", s, " envoyé au serveur (entrée ", Num(entry, dg), ", stop ", Num(sl, dg), ", objectif ", Num(tp, dg), ", risque ", Num(riskPct, 2), " % : ", why, ").");
   }
 
-// Backtest : le robot prend le trade lui-même, comme si tu l'avais validé.
-void TestTrade(string side, double sl, double tp)
+// Backtest : le robot prend le trade lui-même, comme si l'exécution automatique était active.
+void TestTrade(string s, string side, double sl, double tp, double riskPct)
   {
-   if(PositionSelect(_Symbol))
-      return;                                            // une seule position par actif
+   int open = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) == s)
+         return;                                         // une seule position par marché
+      open++;
+     }
+   if(open >= MaxOpen)
+      return;
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    if(TestNoMonday && dt.day_of_week == 1)
       return;
    MqlTick tk;
-   if(!SymbolInfoTick(_Symbol, tk))
+   if(!SymbolInfoTick(s, tk))
       return;
    double price = (side == "buy") ? tk.ask : tk.bid;
    if((side == "buy" && sl >= price) || (side == "sell" && sl <= price))
       return;
    string why;
-   double lots = LotsForRisk(_Symbol, price, sl, AccountInfoDouble(ACCOUNT_BALANCE) * TestRiskPct / 100.0, why);
+   double lots = LotsForRisk(s, price, sl, AccountInfoDouble(ACCOUNT_BALANCE) * riskPct / 100.0, why);
    if(lots <= 0)
       return;
-   if(side == "buy")
-      trade.Buy(lots, _Symbol, 0, sl, tp, "Backtest Gold Swing");
-   else
-      trade.Sell(lots, _Symbol, 0, sl, tp, "Backtest Gold Swing");
+   bool ok = (side == "buy") ? trade.Buy(lots, s, 0, sl, tp, "Backtest Gold Swing")
+                             : trade.Sell(lots, s, 0, sl, tp, "Backtest Gold Swing");
+   if(ok)
+      testTrades++;
   }
 //+------------------------------------------------------------------+

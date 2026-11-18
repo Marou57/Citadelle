@@ -14,6 +14,7 @@ export function normalizeAlert(body) {
     symbol: String(body.symbol || body.ticker || "").toUpperCase().replace(/^[A-Z]+:/, ""),
     side: side === "buy" || side === "long" || side === "achat" ? "buy" : side === "sell" || side === "short" || side === "vente" ? "sell" : "",
     entry: n(body.entry ?? body.price), sl: n(body.sl), tp: n(body.tp),
+    riskPct: n(body.riskPct),
     timeframe: String(body.timeframe || "").slice(0, 10), note: String(body.note || "").slice(0, 200),
   };
 }
@@ -42,14 +43,16 @@ export function evaluateSignal(sig, ctx) {
   add("Annonces économiques", !news, news ? `fenêtre bloquée : ${news.label || "annonce"}` : "aucune fenêtre bloquée");
 
   const balance = account ? account.balance : config.accountSize;
-  const riskAmount = Math.round(balance * config.riskPct) / 100;
+  // Le robot peut demander son propre risque (risque adaptatif), jamais au-dessus de MAX_RISK_PCT.
+  const riskPct = Number.isFinite(sig.riskPct) && sig.riskPct > 0 ? Math.min(sig.riskPct, config.maxRiskPct) : config.riskPct;
+  const riskAmount = Math.round(balance * riskPct) / 100;
   if (account) {
     const dayLossPct = Math.max(0, -account.dayPnlPct);
-    const after = dayLossPct + config.riskPct;
+    const after = dayLossPct + riskPct;
     const limit = config.maxDailyLossPct - config.dailyBufferPct;
     add("Perte du jour", after <= limit, `${dayLossPct.toFixed(2)} % aujourd'hui, ${after.toFixed(2)} % si le stop est touché (seuil ${limit} %)`);
     const totalLossPct = Math.max(0, (config.accountSize - account.equity) / config.accountSize * 100);
-    add("Perte maximale", totalLossPct + config.riskPct <= config.maxLossPct - config.dailyBufferPct, `${totalLossPct.toFixed(2)} % sous le capital de départ (limite ${config.maxLossPct} %)`);
+    add("Perte maximale", totalLossPct + riskPct <= config.maxLossPct - config.dailyBufferPct, `${totalLossPct.toFixed(2)} % sous le capital de départ (limite ${config.maxLossPct} %)`);
     const positions = account.positions || [];
     const mt5Symbol = config.symbolMap[sig.symbol] || sig.symbol;
     const already = positions.some(p => String(p.symbol).toUpperCase() === mt5Symbol.toUpperCase());
@@ -60,5 +63,5 @@ export function evaluateSignal(sig, ctx) {
   }
 
   const blocked = checks.filter(c => !c.ok && c.bloquante);
-  return { ok: blocked.length === 0, checks, riskAmount, rr: Number.isFinite(rr) ? Math.round(rr * 100) / 100 : null };
+  return { ok: blocked.length === 0, checks, riskAmount, riskPct, rr: Number.isFinite(rr) ? Math.round(rr * 100) / 100 : null };
 }

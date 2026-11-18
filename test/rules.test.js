@@ -25,3 +25,15 @@ test("sans compte connecté : accepté avec avertissement non bloquant", () => {
   const r = evaluateSignal(good, { config, account: null, now: tuesday });
   assert.equal(r.ok, true); assert.ok(r.checks.some(c => !c.ok && !c.bloquante));
 });
+
+test("risque demandé par le robot : utilisé, mais plafonné par MAX_RISK_PCT", () => {
+  const cfg = { allowedSymbols: ["XAUUSD", "US100.CASH"], minRR: 2, timezone: "Europe/Paris", noMonday: false, newsBlocks: [], riskPct: 1, maxRiskPct: 1, accountSize: 80000, maxDailyLossPct: 5, maxLossPct: 10, dailyBufferPct: 1, maxOpen: 2, symbolMap: {} };
+  const account = { balance: 80000, equity: 80000, dayPnlPct: 0, positions: [] };
+  const base = { symbol: "us100.cash", side: "buy", entry: 100, sl: 90, tp: 130 };
+  const low = evaluateSignal(normalizeAlert({ ...base, riskPct: 0.5 }), { config: cfg, account });
+  assert.equal(low.ok, true); assert.equal(low.riskPct, 0.5); assert.equal(low.riskAmount, 400);
+  const high = evaluateSignal(normalizeAlert({ ...base, riskPct: 3 }), { config: cfg, account });
+  assert.equal(high.riskPct, 1); assert.equal(high.riskAmount, 800);
+  const none = evaluateSignal(normalizeAlert(base), { config: { ...cfg, riskPct: 0.75 }, account });
+  assert.equal(none.riskPct, 0.75);
+});

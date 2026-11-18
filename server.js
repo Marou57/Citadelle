@@ -43,7 +43,7 @@ function signalText(sig) {
     head,
     `${sig.side === "buy" ? "Achat" : "Vente"} <b>${esc(sig.symbol)}</b> ${sig.timeframe ? "(" + esc(sig.timeframe) + ")" : ""}`,
     `Entrée ${fmt(sig.entry)} · Stop ${fmt(sig.sl)} · Objectif ${fmt(sig.tp)}`,
-    `Risque : ${sig.riskAmount} ${config.currency} (${config.riskPct} %)${sig.rr ? " · R:R " + sig.rr : ""}`,
+    `Risque : ${sig.riskAmount} ${config.currency} (${sig.riskPct ?? config.riskPct} %)${sig.rr ? " · R:R " + sig.rr : ""}`,
     "",
     ...sig.checks.map(c => `${c.ok ? "✅" : c.bloquante ? "❌" : "⚠️"} ${esc(c.regle)} : ${esc(c.detail)}`),
   ];
@@ -83,7 +83,7 @@ function autoStatus() {
   if (!config.autoExecute) return "Exécution automatique : désactivée (AUTO_EXECUTE=false). Les signaux demandent ta validation.";
   if (config.executionMode === "off") return "Exécution automatique prévue, mais EXECUTION_MODE=off : aucun ordre ne part.";
   return store.s.paused ? "⏸ Exécution automatique en PAUSE. Les signaux demandent ta validation. /reprise pour relancer."
-                        : `⚡ Exécution automatique ACTIVE (${config.executionMode}, compte ${config.executionLogin}, risque ${config.riskPct} %). /pause pour arrêter.`;
+                        : `⚡ Exécution automatique ACTIVE (${config.executionMode}, compte ${config.executionLogin}, risque max ${config.maxRiskPct} %). /pause pour arrêter.`;
 }
 async function onCommand(cmd) {
   if (cmd === "pause") { store.s.paused = true; store.save(); store.log("compte", "Exécution automatique mise en pause (Telegram)"); }
