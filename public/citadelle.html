@@ -1003,7 +1003,7 @@ function onSignal(s) {
     const warns = (s.checks || []).filter(c => !c.ok && !c.bloquante).map(c => c.detail);
     W.run(["nova", "ivy", "rex", "hera"], async (W, n, i, r, h) => {
       n.status = "Annonce un signal";
-      await W.say(n, `Alerte${tag} : ${sideTxt(s.side)} ${s.symbol} à ${s.entry}, stop ${s.sl}, objectif ${s.tp}.`, 3.8);
+      await W.say(n, `${s.source === "robot" ? "L'orbe a repéré un setup" : "Alerte" + tag} : ${sideTxt(s.side)} ${s.symbol} à ${s.entry}, stop ${s.sl}, objectif ${s.tp}.`, 3.8);
       await n.walkTo(tVisit("ivy")); i.face = "SE"; i.status = "Vérifie les règles";
       if (s.status === "bloqué") await W.say(i, `Bloqué : ${failed.join(", ")}.`, 4.2);
       else await W.say(i, `Règles vérifiées : ${okN} sur ${total} au vert, R:R ${s.rr ?? "?"}, risque ${s.riskAmount} ${cur()}.${warns.length ? " Attention : " + warns[0] + "." : ""}`, 4.6);

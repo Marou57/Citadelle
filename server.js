@@ -37,7 +37,7 @@ const needBridge = (req, res, next) => {
 // ---------- Telegram
 const validationLink = sig => (config.publicUrl && config.dashboardKey ? `${config.publicUrl}/valider/${sig.id}?k=${encodeURIComponent(config.dashboardKey)}` : "");
 function signalText(sig) {
-  const head = (sig.test ? "🧪 <b>TEST</b> · " : "") + (sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`);
+  const head = (sig.test ? "🧪 <b>TEST</b> · " : sig.source === "robot" ? "🤖 <b>Robot</b> · " : "") + (sig.status === "bloqué" ? "⛔ <b>Signal bloqué par les règles</b>" : sig.status === "en attente" ? "🔔 <b>Nouveau signal à valider</b>" : `ℹ️ <b>Signal ${esc(sig.status)}</b>`);
   const lines = [
     head,
     `${sig.side === "buy" ? "Achat" : "Vente"} <b>${esc(sig.symbol)}</b> ${sig.timeframe ? "(" + esc(sig.timeframe) + ")" : ""}`,
@@ -89,10 +89,10 @@ app.post("/webhook/tradingview", async (req, res) => {
   const sig = createSignal(normalizeAlert(body), false);
   res.json({ ok: true, id: sig.id, status: sig.status });
 });
-function createSignal(a, test) {
+function createSignal(a, test, source = test ? "test" : "tradingview") {
   const ev = evaluateSignal(a, { config, account: store.publicAccount() });
-  const sig = store.addSignal({ id: id(), ...a, ...ev, test, status: ev.ok ? "en attente" : "bloqué", createdAt: Date.now(), expiresAt: Date.now() + config.signalTtlMin * 60000 });
-  const label = (test ? "Signal de test " : "Signal ") + a.symbol;
+  const sig = store.addSignal({ id: id(), ...a, ...ev, test, source, status: ev.ok ? "en attente" : "bloqué", createdAt: Date.now(), expiresAt: Date.now() + config.signalTtlMin * 60000 });
+  const label = (test ? "Signal de test " : source === "robot" ? "Signal du robot " : "Signal ") + a.symbol;
   store.log("signal", ev.ok ? `${label} ${a.side === "buy" ? "achat" : "vente"} en attente de validation` : `${label} bloqué : ${ev.checks.filter(c => !c.ok && c.bloquante).map(c => c.regle).join(", ")}`, { signalId: sig.id });
   telegram.sendSignal(sig, signalText(sig)).then(mid => { if (mid) store.updateSignal(sig.id, { telegramMessageId: mid }); }).catch(e => console.warn("[telegram]", e.message));
   return sig;
@@ -116,6 +116,14 @@ app.post("/bridge/snapshot", needBridge, (req, res) => {
   };
   store.setSnapshot(snap, dayInfo(new Date(), config.timezone).dayKey);
   res.json({ ok: true });
+});
+// Le robot détecte lui-même les setups (stratégie Gold Swing MTF) et les envoie ici, comme une alerte TradingView.
+app.post("/bridge/signal", needBridge, (req, res) => {
+  const a = normalizeAlert(req.body || {});
+  const dup = store.s.signals.find(s => s.source === "robot" && s.symbol === a.symbol && s.side === a.side && Date.now() - s.createdAt < 30 * 60000);
+  if (dup) return res.json({ ok: true, id: dup.id, status: dup.status, doublon: true });
+  const sig = createSignal(a, false, "robot");
+  res.json({ ok: true, id: sig.id, status: sig.status });
 });
 // Format texte simple pour le robot : une ligne par ordre « id|symbole|sens|stop|objectif|risque ».
 app.get("/bridge/orders", needBridge, (req, res) => {

@@ -67,6 +67,20 @@ if longSignal
 ### 7. Le tableau de bord
 `https://ton-adresse/tableau?k=TA_DASHBOARD_KEY` : ajoute-le à l'écran d'accueil de l'iPad.
 
+## La stratégie dans le robot (sans TradingView)
+
+Le robot `CitadelleBridge` contient la stratégie **Gold Swing MTF**, traduite du script Pine :
+- tendance H4 : EMA 21 > 50 > 200 et clôture au-dessus de l'EMA 200 (l'inverse pour la vente) ;
+- entrée H1 : EMA 21 > 50, pullback sur l'EMA 21 (bornes en ATR), bougie de momentum, volume au-dessus de sa moyenne 20 × 1,05, RSI entre 40 et 68 (32 et 60 en vente) ;
+- stop à 2 × ATR, objectif à 3 R.
+
+À chaque bougie H1 clôturée, si un setup apparaît, le robot l'envoie au serveur (`/bridge/signal`). La suite est identique à une alerte TradingView : règles, Telegram, validation.
+
+Différences assumées avec TradingView : la tendance H4 est lue sur la dernière bougie H4 **clôturée** (aucune information du futur), et le volume est le volume en ticks de FTMO.
+
+### Tester sur l'historique
+Dans MetaTrader : Affichage → Testeur de stratégie → `CitadelleBridge`, symbole XAUUSD, unité H1, modèle « Chaque tick basé sur des ticks réels ». En mode test, le robot prend les trades lui-même (risque `TestRiskPct`, pas de lundi) : le rapport donne le taux de réussite, le profit factor et le drawdown.
+
 ## Les phases, dans l'ordre
 
 1. **Lecture seule** : le robot envoie le compte, rien d'autre. `EXECUTION_MODE=off`.
