@@ -33,6 +33,7 @@ export const config = {
   symbolMap: json(process.env.SYMBOL_MAP, {}),               // ex. {"XAUUSD":"XAUUSD.r"} si le nom diffère sur MT5
   newsBlocks: json(process.env.NEWS_BLOCKS, []),             // ex. [{"from":"2026-11-14T14:15:00+01:00","to":"2026-11-14T14:45:00+01:00","label":"CPI US"}]
   signalTtlMin: num(process.env.SIGNAL_TTL_MIN, 30),
+  orderTtlMin: num(process.env.ORDER_TTL_MIN, 10),            // un ordre que le robot n'a pas récupéré à temps est annulé (pas d'entrée en retard)
 
   // Exécution : "off" par défaut. Les ordres ne partent QUE vers le compte EXECUTION_LOGIN.
   executionMode: (process.env.EXECUTION_MODE || "off").toLowerCase(), // off | demo | live

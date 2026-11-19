@@ -192,6 +192,12 @@ setInterval(() => {
     store.log("signal", `Signal ${s.symbol} expiré sans décision`, { signalId: s.id });
     telegram.edit(s.telegramMessageId, signalText(store.getSignal(s.id)));
   });
+  store.s.orders.filter(o => o.status === "à envoyer" && now - o.createdAt > config.orderTtlMin * 60000).forEach(o => {
+    store.updateOrder(o.id, { status: "expiré" });
+    const txt = `Ordre ${o.symbol} annulé : le robot ne l'a pas récupéré en ${config.orderTtlMin} min (exécution désactivée dans MT5 ?)`;
+    store.log("ordre", txt, { orderId: o.id });
+    telegram.send("⌛ " + esc(txt));
+  });
   const silent = store.s.accountAt && now - store.s.accountAt > 5 * 60000;
   if (silent && !store.silentWarned) { store.silentWarned = true; store.log("compte", "Le robot MetaTrader ne répond plus depuis 5 minutes"); telegram.send("⚠️ Le robot MetaTrader ne répond plus depuis 5 minutes."); }
   if (!silent) store.silentWarned = false;
