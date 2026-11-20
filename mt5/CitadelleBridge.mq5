@@ -9,7 +9,7 @@
 //| (risque fixe, SL/TP) pour mesurer la stratégie sur l'historique. |
 //+------------------------------------------------------------------+
 #property copyright "Citadelle"
-#property version   "0.30"
+#property version   "0.40"
 #property strict
 #include <Trade/Trade.mqh>
 
@@ -32,6 +32,12 @@ input int             RsiLen    = 14;
 input double          AtrMultSL = 2.0;              // stop = ATR × 2
 input double          RRRatio   = 3.0;              // objectif = 3 × le stop
 input double          VolFactor = 1.05;             // volume > moyenne 20 × 1,05
+
+input group "Sorties"
+input int    ExitMode   = 0;          // 0 = objectif fixe (RRRatio) ; 1 = sécuriser une partie puis laisser courir
+input double PartialR   = 3.0;        // mode 1 : sortie partielle quand le gain atteint X fois le risque
+input double PartialPct = 50.0;       // mode 1 : part de la position fermée à ce moment (%)
+input double TrailATR   = 3.0;        // mode 1 : stop suiveur à X × ATR H4 du prix, pour le reste
 
 input group "Marchés"
 input string Symbols = "XAUUSD,US100.cash,EURUSD,GBPJPY"; // séparés par des virgules (noms exacts chez ton courtier) ; vide = symbole du graphique
@@ -57,7 +63,7 @@ CTrade trade;
 struct Market
   {
    string            sym;
-   int               hEmaF, hEmaS, hRsi, hT21, hT50, hT200;
+   int               hEmaF, hEmaS, hRsi, hT21, hT50, hT200, hAtrT;
    datetime          lastBar;
   };
 Market mk[];
@@ -113,6 +119,7 @@ int OnInit()
       names += (i > 0 ? ", " : "") + mk[i].sym;
    Print("Citadelle : robot démarré. Marchés : ", (StrategyEnabled ? names : "stratégie désactivée"),
          ". Risque : ", (AdaptiveRisk ? "adaptatif " + Num(RiskBase, 2) + " % / " + Num(RiskReduced, 2) + " %" : "fixe " + Num(RiskBase, 2) + " %"),
+         ". Sorties : ", (ExitMode == 1 ? "partielle à " + Num(PartialR, 1) + "R puis stop suiveur" : "objectif fixe " + Num(RRRatio, 1) + "R"),
          ". Exécution des ordres : ", (AllowTrading ? "ACTIVÉE" : "désactivée"), (inTester ? " (mode backtest)" : ""));
    return(INIT_SUCCEEDED);
   }
@@ -135,7 +142,8 @@ void AddMarket(string s)
    m.hT21  = iMA(s, TrendTF, EmaFast, 0, MODE_EMA, PRICE_CLOSE);
    m.hT50  = iMA(s, TrendTF, EmaSlow, 0, MODE_EMA, PRICE_CLOSE);
    m.hT200 = iMA(s, TrendTF, EmaTrend, 0, MODE_EMA, PRICE_CLOSE);
-   if(m.hEmaF == INVALID_HANDLE || m.hEmaS == INVALID_HANDLE || m.hRsi == INVALID_HANDLE || m.hT21 == INVALID_HANDLE || m.hT50 == INVALID_HANDLE || m.hT200 == INVALID_HANDLE)
+   m.hAtrT = iATR(s, TrendTF, AtrLen);
+   if(m.hAtrT == INVALID_HANDLE || m.hEmaF == INVALID_HANDLE || m.hEmaS == INVALID_HANDLE || m.hRsi == INVALID_HANDLE || m.hT21 == INVALID_HANDLE || m.hT50 == INVALID_HANDLE || m.hT200 == INVALID_HANDLE)
      {
       Print("Citadelle : indicateurs impossibles à créer sur ", s, " (ignoré).");
       return;
@@ -155,6 +163,7 @@ void OnDeinit(const int reason)
       IndicatorRelease(mk[i].hT21);
       IndicatorRelease(mk[i].hT50);
       IndicatorRelease(mk[i].hT200);
+      IndicatorRelease(mk[i].hAtrT);
      }
    if(inTester && startBal > 0)
      {
@@ -317,6 +326,8 @@ void Execute(string line)
    int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    sl = NormalizeDouble(sl, dg);
    tp = (tp > 0) ? NormalizeDouble(tp, dg) : 0;
+   if(ExitMode == 1)
+      tp = 0;                                            // mode « laisser courir » : pas d'objectif, le robot gère la sortie
    MqlTick tk;
    if(!SymbolInfoTick(sym, tk))
      { Report(id, false, 0, 0, "pas de prix pour " + sym); return; }
@@ -350,8 +361,10 @@ int LossesInARow()
   {
    if(!HistorySelect(0, TimeCurrent()))
       return(0);
-   int cnt = 0;
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   long ids[];
+   double pr[];
+   int n = 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0 && n < 40; i--)
      {
       ulong d = HistoryDealGetTicket(i);
       if(d == 0 || HistoryDealGetInteger(d, DEAL_MAGIC) != Magic)
@@ -359,13 +372,88 @@ int LossesInARow()
       long e = HistoryDealGetInteger(d, DEAL_ENTRY);
       if(e != DEAL_ENTRY_OUT && e != DEAL_ENTRY_OUT_BY)
          continue;
+      long pid = HistoryDealGetInteger(d, DEAL_POSITION_ID);
       double p = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
-      if(p < 0)
+      int k = -1;
+      for(int q = 0; q < n; q++)
+         if(ids[q] == pid) { k = q; break; }
+      if(k < 0)
+        {
+         ArrayResize(ids, n + 1);
+         ArrayResize(pr, n + 1);
+         ids[n] = pid;
+         pr[n] = 0;
+         k = n;
+         n++;
+        }
+      pr[k] += p;
+     }
+   int cnt = 0;
+   for(int q = 0; q < n; q++)                            // du trade le plus récent au plus ancien
+     {
+      if(pr[q] < 0)
          cnt++;
       else
          break;
      }
    return(cnt);
+  }
+
+int MarketIndex(string s)
+  {
+   for(int i = 0; i < nMk; i++)
+      if(mk[i].sym == s)
+         return(i);
+   return(-1);
+  }
+
+// Mode 1 : à PartialR, ferme PartialPct % et met le stop au point d'entrée ; ensuite stop suiveur à TrailATR × ATR H4.
+void ManagePositions()
+  {
+   if(ExitMode != 1)
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+      string s = PositionGetString(POSITION_SYMBOL);
+      bool buy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open = PositionGetDouble(POSITION_PRICE_OPEN), sl = PositionGetDouble(POSITION_SL), vol = PositionGetDouble(POSITION_VOLUME);
+      if(sl <= 0)
+         continue;
+      MqlTick tk;
+      if(!SymbolInfoTick(s, tk))
+         continue;
+      double px = buy ? tk.bid : tk.ask;
+      int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+      double pt = SymbolInfoDouble(s, SYMBOL_POINT);
+      bool secured = buy ? (sl >= open - pt) : (sl <= open + pt);
+      if(!secured)
+        {
+         double risk = MathAbs(open - sl);
+         if(risk <= 0)
+            continue;
+         if(buy ? (px < open + PartialR * risk) : (px > open - PartialR * risk))
+            continue;
+         double step = SymbolInfoDouble(s, SYMBOL_VOLUME_STEP), vmin = SymbolInfoDouble(s, SYMBOL_VOLUME_MIN);
+         double part = MathFloor(vol * PartialPct / 100.0 / step) * step;
+         if(part >= vmin && vol - part >= vmin)
+            trade.PositionClosePartial(t, part);
+         if(PositionSelectByTicket(t))
+            trade.PositionModify(t, NormalizeDouble(open, dg), 0);
+         continue;
+        }
+      int k = MarketIndex(s);
+      if(k < 0)
+         continue;
+      double atr = Buf(mk[k].hAtrT, 1);
+      if(atr == EMPTY_VALUE || atr <= 0)
+         continue;
+      double nsl = NormalizeDouble(buy ? px - TrailATR * atr : px + TrailATR * atr, dg);
+      if(buy ? (nsl > sl + 10 * pt) : (nsl < sl - 10 * pt))
+         trade.PositionModify(t, nsl, 0);
+     }
   }
 
 double CurrentRiskPct(string &why)
@@ -426,6 +514,7 @@ bool CanOpen()
 
 void CheckAll()
   {
+   ManagePositions();
    ChallengeWatch();
    if(!StrategyEnabled)
       return;
@@ -567,6 +656,8 @@ void TestTrade(string s, string side, double sl, double tp, double riskPct)
    double lots = LotsForRisk(s, price, sl, AccountInfoDouble(ACCOUNT_BALANCE) * riskPct / 100.0, why);
    if(lots <= 0)
       return;
+   if(ExitMode == 1)
+      tp = 0;
    bool ok = (side == "buy") ? trade.Buy(lots, s, 0, sl, tp, "Backtest Gold Swing")
                              : trade.Sell(lots, s, 0, sl, tp, "Backtest Gold Swing");
    if(ok)

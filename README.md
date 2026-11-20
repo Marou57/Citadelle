@@ -86,6 +86,7 @@ Dans MetaTrader : Affichage → Testeur de stratégie → `CitadelleBridge`, sym
 - `Symbols` : marchés scannés, noms exacts chez le courtier (FTMO : `XAUUSD,US100.cash,EURUSD,GBPJPY`). Le serveur doit les autoriser : `ALLOWED_SYMBOLS=XAUUSD,US100.CASH,EURUSD,GBPJPY`.
 - Risque adaptatif : `RiskBase` (1 %) en temps normal, `RiskReduced` (0,5 %) après `LossStreak` pertes d'affilée, quand l'équité passe `DrawdownPct` sous le capital de départ, ou à moins de `NearTargetPct` de l'objectif.
 - Le robot envoie son risque avec chaque signal ; le serveur l'applique sans jamais dépasser `MAX_RISK_PCT`.
+- Sorties (v0.40) : `ExitMode = 0` objectif fixe à `RRRatio` ; `ExitMode = 1` ferme `PartialPct` % à `PartialR` fois le risque, met le stop au point d'entrée, puis suit le reste à `TrailATR` × ATR H4 (sans objectif).
 - `ChallengeMode` : plus aucun nouveau trade une fois l'objectif `TargetPct` atteint depuis `StartBalance` (à régler sur le vrai capital du challenge en réel).
 
 ## Les phases, dans l'ordre
